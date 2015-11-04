@@ -13,7 +13,7 @@
 #       the script, see a sample incrontab below:
 #
 #               $ incrontab -l
-#               /data/ingest IN_CLOSE_WRITE /data/scripts/ingest.py $@/$#
+#               /data/ingest IN_CLOSE_WRITE /data/scripts/push.py $@/$#
 #
 #       Note, the $@/$# arguments pass the
 #       path and file name to this script
@@ -60,8 +60,8 @@ def computeMd5AndLines(fname):
     hash = md5()
     lines = 0
     with open(fname, "rb") as f:
-    # Read 4096 bytes at a time to
-    # support reading large files
+        # Read 4096 bytes at a time to
+        # support reading large files
         for chunk in iter(lambda: f.read(4096), b""):
             # Tabulate the newlines in this chunk
             lines = lines + chunk.count('\x0a')
@@ -83,7 +83,7 @@ if dataSetType not in validDataSets:
 # Get the full file path by stripping
 # off the last token (filename) and 
 # appending RowCounts.txt
-rowCountFullFilePath = "/".join([fullFilePath.split('/')[:-1]) + "/RowCounts.txt"
+rowCountFullFilePath = "/".join(fullFilePath.split('/')[:-1]) + "/RowCounts.txt"
 
 # A boolean for ensuring actual row
 # counts match the metadata in RowCounts.txt
@@ -116,8 +116,7 @@ if dataSetType != "RowCounts":
             doesMatch = (int(expectedRows) == int(countedRows))
             break
             
-# Only proceed if we have a 
-# valid data or metadata file
+# Only proceed if we have a valid data or metadata file
 if doesMatch or dataSetType == "RowCounts":
 
     # Read in the Azure account key from
@@ -140,6 +139,9 @@ if doesMatch or dataSetType == "RowCounts":
     targetIngestFullPath = "{0}/{1}.txt".format(targetIngestPath, targetFile)
     targetArchiveFullPath = "{0}/{1}".format(dataSetType, targetFile)
 
+    # Ensure a clean slate for pushing the new data set
+    azureStorage.delete_blob(ingestContainer, targetIngestFullPath)
+
     # Try to put the blob out in the wild, provide MD5 for error
     # checking since M$ didn't feel the need to implement a return
     # code for this function
@@ -149,6 +151,9 @@ if doesMatch or dataSetType == "RowCounts":
                                           content_md5=md5Checksum,
                                           max_connections=8)
 
+    # Create a template external table
+    # and populate it with specifics
+    # for a given data set type
     hiveExtTableQuery =\
     """
     CREATE OR REPLACE EXTERNAL TABLE pls.{dType}_stg ( LIKE pls.{dType}_dev )
@@ -162,8 +167,12 @@ if doesMatch or dataSetType == "RowCounts":
                path=targetIngestFullPath)
 
     hiveInsertQuery = "INSERT INTO pls.{0}_dev SELECT * FROM pls.{0}_stg ;".format(dataSetType)
+
     # TODO - call out to Popen() and have a beeline Hive client execute
     # the CREATE EXTERNAL TABLE and do an INSERT INTO ... SELECT * FROM ...
+
+    # TODO - scrape the STDOUT for the number 
+    # of records inserted for logging
 
     # Archive it as well
     azureStorage.put_block_blob_from_path(archiveContainer,
