@@ -143,8 +143,31 @@ if doesMatch or dataSetType == "RowCounts":
     # Try to put the blob out in the wild, provide MD5 for error
     # checking since M$ didn't feel the need to implement a return
     # code for this function
-    azureStorage.put_block_blob_from_path(targetContainer,
-                                          targetFileName,
+    azureStorage.put_block_blob_from_path(ingestContainer,
+                                          targetIngestFullPath,
+                                          sourceFilePath,
+                                          content_md5=md5Checksum,
+                                          max_connections=8)
+
+    hiveExtTableQuery =\
+    """
+    CREATE OR REPLACE EXTERNAL TABLE pls.{dType}_stg ( LIKE pls.{dType}_dev )
+    CLUSTERED BY(GenClientID) SORTED BY(GenPatientID) INTO 32 BUCKETS
+    ROW FORMAT DELIMITED FIELDS TERMINATED BY '|'
+    STORED AS TEXTFILE LOCATION 'wasb://{container}@{account}/{path}'
+    TBLPROPERTIES("skip.header.line.count"="1");
+    """.format(dType=dataSetType, 
+               container=ingestContainer, 
+               account=azureAccount, 
+               path=targetIngestFullPath)
+
+    hiveInsertQuery = "INSERT INTO pls.{0}_dev SELECT * FROM pls.{0}_stg ;".format(dataSetType)
+    # TODO - call out to Popen() and have a beeline Hive client execute
+    # the CREATE EXTERNAL TABLE and do an INSERT INTO ... SELECT * FROM ...
+
+    # Archive it as well
+    azureStorage.put_block_blob_from_path(archiveContainer,
+                                          targetArchiveFullPath,
                                           sourceFilePath,
                                           content_md5=md5Checksum,
                                           max_connections=8)
