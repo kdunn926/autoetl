@@ -23,14 +23,16 @@
 
 
 from sys import argv
-from os import stat
+from os import stat, devnull
 from zipfile import ZipFile 
 from shutil import move
 from time import time
+from subprocess import Popen, STDOUT
 
 fullFilePath = argv[1]
 filename = fullFilePath.split('/')[-1]
 
+unzipUtil = "/usr/bin/7z"
 loadingDir = "/data/loading"
 metaDir = "/data/meta"
 
@@ -87,11 +89,31 @@ with ZipFile(fullFilePath) as zf:
 
         # Wrap this up to log errors, if necessary
         try:
-            zf.extract(member, path, pwd=theDataPassword)
-            statusDict[member] = makeRecord(member.filename, path, "OK")
+            # This doesn't work with AES-encrypted archives,
+            # throws an RuntimeError -- "bad password"
+            #zf.extract(member, path, pwd=theDataPassword)
 
-        except RuntimeError as e:
-            statusDict[member] = makeRecord(member.filename, path, e.message)
+            unzipCommand = "{prog} x {fname} {member} -o{dest} -p{passwd}".format(prog=unzipUtil,
+                                                                                  fname=fullFilePath,
+                                                                                  member=member.filename,
+                                                                                  dest=path,
+                                                                                  passwd=theDataPassword)
+            #print unzipCommand
+
+            # Used to supress output
+            devNull = open(devnull, 'w')
+            p = Popen(unzipCommand, shell=True, stdout=devNull, stderr=STDOUT)
+            p.wait()
+
+            if p.returncode == 0:
+                statusDict[member] = makeRecord(member.filename, path, "OK")
+            else:
+                statusDict[member] = makeRecord(member.filename, path, p.returncode)
+            #print "Extracted", member.filename, "to", path
+
+        except OSError as e:
+            #print "Caught exception for", member.filename, e[0]
+            statusDict[member] = makeRecord(member.filename, path, e[0])
             pass
 
 

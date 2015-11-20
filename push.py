@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/home/hdiuser/.conda/envs/autoetl/bin/python
 #
 #       incrond-triggered data upload to Azure Blob
 #
@@ -26,12 +26,14 @@ from hashlib import md5
 from os.path import isfile
 from time import sleep, time
 from azure.storage.blob import BlobService
+from azure.common import AzureMissingResourceHttpError, AzureHttpError
+from subprocess import Popen, STDOUT
 
 metaDir = "/data/meta"
 
-azureAccount = 'plsinsightdata'
-ingestContainer = 'sunnyday'
-archiveContainer = 'plsinsightdata'
+azureAccount = 'plsdatalake'
+ingestContainer = 'kdunn-test'
+archiveContainer = 'kdunn-test'
 azureKeyLocation = '/etc/hadoop/conf/key'
 
 # This is the path where the data will be staged
@@ -67,7 +69,7 @@ def computeMd5AndLines(fname):
             lines = lines + chunk.count('\x0a')
 
             hash.update(chunk)
-    return hash.hexdigest(), lines
+    return hash.digest(), lines
 
 fullFilePath = argv[1]
 filename = fullFilePath.split('/')[-1]
@@ -86,7 +88,7 @@ if dataSetType not in validDataSets:
 rowCountFullFilePath = "/".join(fullFilePath.split('/')[:-1]) + "/RowCounts.txt"
 
 # A boolean for ensuring actual row
-# counts match the metadata in RowCounts.txt
+# counts  the metadata in RowCounts.txt
 doesMatch = False
 
 md5Checksum = None
@@ -112,9 +114,12 @@ if dataSetType != "RowCounts":
         dataSet, expectedRows = c.split("|")
         # Find the data set of interest
         if dataSet == dataSetType:
-            # Compare the records
-            doesMatch = (int(expectedRows) == int(countedRows))
+            #print "Expecting", expectedRows, "got", dataRows + 1
+            # Compare the records (excluding header row)
+            doesMatch = (int(expectedRows) == int(countedRows - 1))
             break
+
+result = None
             
 # Only proceed if we have a valid data or metadata file
 if doesMatch or dataSetType == "RowCounts":
@@ -140,16 +145,26 @@ if doesMatch or dataSetType == "RowCounts":
     targetArchiveFullPath = "{0}/{1}".format(dataSetType, targetFile)
 
     # Ensure a clean slate for pushing the new data set
-    azureStorage.delete_blob(ingestContainer, targetIngestFullPath)
+    try:
+        azureStorage.delete_blob(ingestContainer, targetIngestFullPath)
+    except AzureMissingResourceHttpError:
+        pass
 
     # Try to put the blob out in the wild, provide MD5 for error
     # checking since M$ didn't feel the need to implement a return
     # code for this function
-    azureStorage.put_block_blob_from_path(ingestContainer,
-                                          targetIngestFullPath,
-                                          sourceFilePath,
-                                          content_md5=md5Checksum,
-                                          max_connections=8)
+
+    # On further testing, the "content_md5" is only for header rather
+    # than the actual blob content - have to wait for these APIs to mature
+    try:
+        azureStorage.put_block_blob_from_path(ingestContainer,
+                                              targetIngestFullPath,
+                                              fullFilePath,
+                                              #content_md5=md5Checksum.encode('base64').strip(),
+                                              max_connections=5)
+    except AzureHttpError as e:
+        result = "Ingest-Failed:" + e.message.split(".")[0]
+
 
     # Create a template external table
     # and populate it with specifics
@@ -170,23 +185,33 @@ if doesMatch or dataSetType == "RowCounts":
 
     # TODO - call out to Popen() and have a beeline Hive client execute
     # the CREATE EXTERNAL TABLE and do an INSERT INTO ... SELECT * FROM ...
+    #p = Popen("beeline", shell=True)
 
     # TODO - scrape the STDOUT for the number 
     # of records inserted for logging
 
     # Archive it as well
-    azureStorage.put_block_blob_from_path(archiveContainer,
-                                          targetArchiveFullPath,
-                                          sourceFilePath,
-                                          content_md5=md5Checksum,
-                                          max_connections=8)
+    # On further testing, the "content_md5" is only for header rather
+    # than the actual blob content - have to wait for these APIs to mature
+    try:
+        azureStorage.put_block_blob_from_path(archiveContainer,
+                                              targetArchiveFullPath,
+                                              fullFilePath,
+                                              #content_md5=md5Checksum.encode('base64').strip(),
+                                              max_connections=5)
+    except AzureHttpError as e:
+        if result is not None:
+            result = result + " and Archive-Failed:" + e.message.split(".")[0]
+        else:
+            result = "Archive-Failed:" + e.message.split(".")[0]
 
 
 # Get the current time (GMT, epoch)
 nowTime = int(time())
 
 # Build up a CSV record for this files metadata
-record = "{0},{1},{2},{3},{4}\n".format(nowTime, filename, countedRows, md5Checksum, result)
+record = "{0},{1},{2},{3},{4}\n".format(nowTime, filename, countedRows, 
+                                        md5Checksum.encode('base64').strip(), result)
 
 # Push the record to a tempfile for now TODO: append to MD file
 theFile = open(metaDir + '/insert', 'a')
