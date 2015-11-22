@@ -6,14 +6,14 @@
 #               (c) Dunn Infinite Designs LLC (2015)
 #
 #       This script is invoked anytime an
-#       IN_CLOSE_WRITE event is detected by
+#       IN_CREATE event is detected by
 #       the incrond daemon (assumed to be running)
 #
 #       Only the directories specified will trigger
 #       the script, see a sample incrontab below:
 #
 #               $ incrontab -l
-#               /data/ingest IN_CLOSE_WRITE /data/scripts/push.py $@/$#
+#               /data/ingest IN_CREATE /data/scripts/push.py $@/$#
 #
 #       Note, the $@/$# arguments pass the
 #       path and file name to this script
@@ -70,6 +70,9 @@ validDataSets = [
 'Vaccines',
 'Vitals'
 ]
+
+# Get the current time (GMT, epoch)
+startTime = int(time())
 
 dataSetDdl = {}
 with open(ddlFile) as f:
@@ -281,10 +284,8 @@ if doesMatch or dataSetType == "Clients":
     #print "ERR:", "\n".join(stderr)
     #print "\n\n----\n"
 
-    print stdout[-3].split()[1], " records"
-
-    # TODO - scrape the STDOUT for the number 
-    # of records inserted for logging
+    result = stdout[-3].split()[1]
+    #print result,  "records"
 
     # Archive it as well -- this functionality has been relocated
     # earlier in the ETL process, entire ZIP archives will be created
@@ -310,9 +311,13 @@ else:
 # Get the current time (GMT, epoch)
 nowTime = int(time())
 
+# Time the whole process
+runTime = (nowTime - startTime)
+
 # Build up a CSV record for this files metadata
-record = "{0},{1},{2},{3},{4}\n".format(nowTime, filename, countedRows-1, 
-                                        md5Checksum.encode('base64').strip(), result)
+record = "{0},{1},{2},{3},{4},{5}\n".format(nowTime, runTime, filename, 
+                                            md5Checksum.encode('base64').strip(), 
+                                            countedRows - 1, result)
 
 # Push the record to a tempfile for now TODO: append to MD file
 theFile = open(metaDir + '/insert', 'a')

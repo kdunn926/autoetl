@@ -7,14 +7,14 @@
 #               (c) Dunn Infinite Designs LLC (2015)
 #
 #       This script is invoked anytime an
-#       IN_CLOSE_WRITE event is detected by
+#       IN_CREATE event is detected by
 #       the incrond daemon (assumed to be running)
 #
 #       Only the directories specified will trigger
 #       the script, see a sample incrontab below:
 #
 #               $ incrontab -l
-#               /data/stage IN_CLOSE_WRITE /data/scripts/unpack.py $@/$#
+#               /data/stage IN_CREATE /data/scripts/unpack.py $@/$#
 #
 #       Note, the $@/$# arguments pass the
 #       path and file name to this script
@@ -51,12 +51,15 @@ def getFileStats(fullFilePath):
     creationTime = fileStatInfo.st_ctime
     return creationTime, modificationTime, sizeInBytes
 
-def makeRecord(filename, path, code):
+def makeRecord(filename, path, code, startTime):
 
     fullFilePath = path + "/" + filename
 
     # Get the current time (GMT, epoch)
     now = int(time())
+
+    # Track unzip elapsed time
+    runTime = (now - startTime)
 
     if code == "OK":
         create, mod, size = getFileStats(fullFilePath)
@@ -64,8 +67,8 @@ def makeRecord(filename, path, code):
         create = mod = size = "NA"
 
     # Build up a CSV record for this files metadata
-    return "{0},{1},{2},{3},{4},{5}\n".format(now, create, filename, 
-                                              size, mod, code)
+    return "{0},{1},{2},{3},{4},{5},{6}\n".format(now, create, filename, 
+                                                  size, mod, runTime, code)
 
 
 statusDict = {}
@@ -93,6 +96,9 @@ with ZipFile(fullFilePath) as zf:
             # throws an RuntimeError -- "bad password"
             #zf.extract(member, path, pwd=theDataPassword)
 
+            # Get the current time (GMT, epoch)
+            startTime = int(time())
+
             unzipCommand = "{prog} x {fname} {member} -o{dest} -p{passwd}".format(prog=unzipUtil,
                                                                                   fname=fullFilePath,
                                                                                   member=member.filename,
@@ -106,9 +112,9 @@ with ZipFile(fullFilePath) as zf:
             p.wait()
 
             if p.returncode == 0:
-                statusDict[member] = makeRecord(member.filename, path, "OK")
+                statusDict[member] = makeRecord(member.filename, path, "OK", startTime)
             else:
-                statusDict[member] = makeRecord(member.filename, path, p.returncode)
+                statusDict[member] = makeRecord(member.filename, path, p.returncode, startTime)
             #print "Extracted", member.filename, "to", path
 
         except OSError as e:

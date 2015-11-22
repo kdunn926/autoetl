@@ -62,7 +62,7 @@ if "MD5" in filename.upper():
     exit(0)
 
 # Get the current time (GMT, epoch)
-nowTime = int(time())
+startTime = int(time())
 
 # Get file metadata
 fileStatInfo = stat(fullFilePath)
@@ -110,9 +110,14 @@ else:
 
     result = "CHECKSUM MISMATCH"
 
+# Get the current time (GMT, epoch)
+endTime = int(time())
+
+runTime = (endTime - startTime)
+
 # Build up a CSV record for this files metadata
-record = "{0},{1},{2},{3},{4},{5},{6}\n".format(nowTime, creationTime, filename, 
-                                                sizeInBytes, modificationTime, 
+record = "{0},{1},{2},{3},{4},{5},{6}\n".format(startTime, creationTime, filename, 
+                                                sizeInBytes, modificationTime, runTime
                                                 md5sum, result)
 
 # Push the record to a tempfile for now TODO: append to MD file
