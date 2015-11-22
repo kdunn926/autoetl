@@ -27,7 +27,7 @@ from os.path import isfile
 from os import devnull
 from time import sleep, time
 from azure.storage.blob import BlobService
-from azure.common import AzureMissingResourceHttpError, AzureHttpError
+from azure.common import AzureMissingResourceHttpError, AzureHttpError 
 from subprocess import Popen, STDOUT, PIPE
 from json import loads
 import re
@@ -76,7 +76,10 @@ startTime = int(time())
 
 dataSetDdl = {}
 with open(ddlFile) as f:
-    dataSetDdl = loads(f.read().replace("\n", ""))
+    # Beeline doesn't like DDL with commented fields
+    # and fails to parse if it is left in
+    onlyEnabledFields = [l for l in f.readlines() if "--" not in l]
+    dataSetDdl = loads("".join(onlyEnabledFields).replace("\n", ""))
     f.close()
 
 def computeMd5AndLines(fname):
@@ -131,10 +134,8 @@ if dataSetType != "Clients":
     for c in allCounts:
         # Split the lines on the delimiter
         dataSet, expectedRows = c.split("|")
-        print "|", dataSetType, "|", dataSet, "|"
         # Find the data set of interest
         if dataSet == dataSetType:
-            print expectedRows, countedRows
             # Compare the records (excluding header row)
             doesMatch = (int(expectedRows) == int(countedRows - 1))
             break
