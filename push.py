@@ -1,4 +1,4 @@
-#!/home/hdiuser/.conda/envs/autoetl/bin/python
+#!/usr/bin/python
 #
 #       incrond-triggered data upload to Azure Blob
 #
@@ -13,7 +13,7 @@
 #       the script, see a sample incrontab below:
 #
 #               $ incrontab -l
-#               /data/ingest IN_CREATE /data/scripts/push.py $@/$#
+#               /data/ingest IN_CREATE /usr/bin/python /data/scripts/push.py $@/$#
 #
 #       Note, the $@/$# arguments pass the
 #       path and file name to this script
@@ -33,6 +33,7 @@ from json import loads
 import re
 
 metaDir = "/data/meta"
+logRoot = "/data/logs/"
 
 azureAccount = 'plsdatalake'
 ingestContainer = 'frisco'
@@ -48,12 +49,12 @@ hadoopEdgeNode = "frisco-ssh.azurehdinsight.net"
 hiveServer2 = "hn0-frisco.jmlhoa5f5zfenakxzzq1hcslzh.bx.internal.cloudapp.net"
 
 ddlFile = "/data/scripts/tableDefs.json"
-beeline = "/usr/bin/beeline"
+beeline = "env JAVA_HOME=/usr/lib/jvm/java-7-openjdk-amd64 /usr/bin/beeline"
 
 # This is the path where the data will be staged
 # in the ingest container (i.e. HDFS-visible location)
 # in the HDInsight cluster for Hive external tables
-targetIngestPath = "tmp/hive/hdiuser/ingest"
+targetIngestPath = "tmp/hive"
 
 validDataSets = [
 'Allergies',
@@ -74,13 +75,56 @@ validDataSets = [
 # Get the current time (GMT, epoch)
 startTime = int(time())
 
+
+# This is the full source DDL 
+# (including empty columns)
 dataSetDdl = {}
+
+def stringClean(theString):
+    return theString.lstrip()\
+                    .rstrip()\
+                    .strip()\
+                    .replace('"', "")
+
+# This DDL excludes the empty columns
+insertDdl = {}
 with open(ddlFile) as f:
-    # Beeline doesn't like DDL with commented fields
-    # and fails to parse if it is left in
-    onlyEnabledFields = [l for l in f.readlines() if "--" not in l]
-    dataSetDdl = loads("".join(onlyEnabledFields).replace("\n", ""))
+    allTheFields = f.readlines()
     f.close()
+
+    #dataSetDdl = loads("".join(allTheFields).replace("\n", "").replace("--", ""))
+    allTablesAndFields = "".join(allTheFields).replace("}", "").replace("{", "").split('",')
+    for tAndF in allTablesAndFields:
+        table, fields = tAndF.split(":") 
+
+        # Clean up the string and tokenize fields
+        allFields = stringClean(fields).replace(",", "").split("\n")
+    
+        validFields = [f.lstrip().replace("--", "") for f in allFields]
+
+        # Filter out empty tokens 
+        fieldString = ", ".join([v for v in validFields if v != ""])
+        dataSetDdl[stringClean(table)] = fieldString
+
+        # Beeline doesn't like DDL with commented fields
+        # and fails to parse if it is left in
+
+        # This filters commented columns and extracts just the column name
+        # for generating a statement like INSERT INTO someTable SELECT colA, colB, colN FROM
+
+        # Clean up the string and tokenize fields
+        fields = stringClean(fields).split("\n")
+    
+        # Filter out disable fields
+        validFields = [f.lstrip() for f in fields if "--" not in f]
+
+        # Filter out empty tokens, split each token for 
+        # only column name and join them with a column
+        fieldString = ", ".join([v.split()[0] for v in validFields if v != ""])
+        insertDdl[stringClean(table)] = fieldString
+
+#print "D-DDL", dataSetDdl
+#print "I-DDL", insertDdl
 
 def computeMd5AndLines(fname):
     hash = md5()
@@ -105,6 +149,13 @@ dataSetType = filename.split('.')[0]
 if dataSetType not in validDataSets:
     # Quietly ignore the erroneous files
     exit(0)
+
+logFile = logRoot + "/push-{0}.log".format(dataSetType + "-" + str(startTime))
+
+theLog = open(logFile, 'w+')
+
+theLog.write("Beginning ouput log\n")
+theLog.flush()
 
 # Get the full file path by stripping
 # off the last token (filename) and 
@@ -145,6 +196,9 @@ result = None
 # Only proceed if we have a valid data or metadata file
 if doesMatch or dataSetType == "Clients":
 
+    theLog.write("Record counts match, proceeding with load\n\n")
+    theLog.flush()
+
     # Read in the Azure account key from
     # the super secret location
     accountKeyFile = open(azureKeyLocation, 'r')
@@ -168,6 +222,8 @@ if doesMatch or dataSetType == "Clients":
     # Ensure a clean slate for pushing the new data set
     try:
         azureStorage.delete_blob(ingestContainer, targetIngestFullPath)
+        theLog.write("Existing ingest blob found, deleting it\n\n")
+        theLog.flush()
     except AzureMissingResourceHttpError:
         pass
 
@@ -183,15 +239,19 @@ if doesMatch or dataSetType == "Clients":
                                               fullFilePath,
                                               #content_md5=md5Checksum.encode('base64').strip(),
                                               max_connections=5)
+        theLog.write("Uploaded blob to ingest container : {0}\n".format(ingestContainer))
+        theLog.flush()
     except AzureHttpError as e:
         result = "Ingest-Failed:" + e.message.split(".")[0]
+        theLog.write("Upload exception: {0}\n\n".format(result))
+        theLog.flush()
 
 
     # Create a list of queries for Hive
     hiveQueries = []
 
     sortedByString = "SORTED BY(GenPatientID)"
-    if dataSetType == "Clients":
+    if dataSetType == "Clients" or dataSetType == "Providers":
         sortedByString = ""
 
     # Create a template external table
@@ -199,17 +259,17 @@ if doesMatch or dataSetType == "Clients":
     # for a given data set type
     hiveCreateExtTable =\
     """
-    DROP TABLE pls.{dType}_stg ; \n
-    CREATE EXTERNAL TABLE pls.{dType}_stg 
+    DROP TABLE pls.kdunn_{dType}_stg ; \n
+    CREATE EXTERNAL TABLE pls.kdunn_{dType}_stg 
     ( {ddl} )
     CLUSTERED BY(GenClientID) {sortString} INTO 32 BUCKETS 
     ROW FORMAT DELIMITED FIELDS TERMINATED BY '|' 
-    STORED AS TEXTFILE LOCATION 'wasb://{container}@{account}/{dType}' 
+    STORED AS TEXTFILE LOCATION 'wasb://{container}@{account}/pls/stage/{dType}' 
     TBLPROPERTIES("skip.header.line.count"="1");
     """.format(dType=dataSetType, 
                ddl=dataSetDdl[dataSetType],
                sortString=sortedByString,
-               container=ingestContainer, 
+               container=productionContainer, 
                account=azureAccount + ".blob.core.windows.net")
                #path=targetIngestFullPath)
 
@@ -224,15 +284,20 @@ if doesMatch or dataSetType == "Clients":
     if dataSetType in ['Providers', 'Patients', 'Clients']:
         try:
             azureStorage.delete_blob(ingestContainer, dataSetType)
+            theLog.write("Truncated {0} via Blob deletion\n\n".format(dataSetType))
+            theLog.flush()
         except AzureMissingResourceHttpError:
             pass
 
-    hiveQueries.append("LOAD DATA INPATH '/{path}' INTO TABLE pls.{t}_stg ;".format(path=targetIngestFullPath,
-                                                                                    t=dataSetType))
+    loadStgQuery = "LOAD DATA INPATH '/{path}' INTO TABLE pls.kdunn_{t}_stg ;".format(path=targetIngestFullPath,
+                                                                                t=dataSetType)
+    hiveQueries.append(loadStgQuery)
 
-    hiveQueries.append("INSERT INTO TABLE pls.{0}_dev SELECT * FROM pls.{0}_stg ;".format(dataSetType))
+    loadDevQuery = "INSERT INTO TABLE pls.kdunn_{0}_dev SELECT {1} FROM pls.kdunn_{0}_stg ;".format(dataSetType,
+                                                                                        insertDdl[dataSetType])
+    hiveQueries.append(loadDevQuery)
 
-    hiveQueries.append("SELECT COUNT(*) FROM pls.{0}_dev ;".format(dataSetType))
+    hiveQueries.append("SELECT COUNT(*) FROM pls.kdunn_{0}_stg ;".format(dataSetType))
 
     # Hide SSH output
     devNull = open(devnull)
@@ -241,6 +306,9 @@ if doesMatch or dataSetType == "Clients":
     # connection through
     ssh = Popen(["ssh", hadoopEdgeNode, "-L10001:{hs2}:10001".format(hs2=hiveServer2)],
                 stdout=devNull, stderr=devNull)
+
+    theLog.write("Opening SSH tunnel to edge node {0}\n\n".format(hadoopEdgeNode))
+    theLog.flush()
 
     # TODO - call out to Popen() and have a beeline Hive client execute
     # the CREATE EXTERNAL TABLE and do an INSERT INTO ... SELECT * FROM ...
@@ -255,11 +323,16 @@ if doesMatch or dataSetType == "Clients":
     # Initiate the connection
     with p.stdin as hiveCli:
         hiveCli.write(hiveConnectString + "\n")
+        theLog.write("Connecting to Hiveserver2: " + hiveConnectString + "\n")
+        theLog.flush()
 
         # Execute the loading process (finally)
         for q in hiveQueries:
             #print "hive < ", q
             hiveCli.write(q + "\n")
+            theLog.write("Executing Hive query: \n")
+            theLog.write(q + "\n")
+            theLog.flush()
 
         #print "OUT:", p.stdout.readlines()
         #print "ERR:", p.stderr.readlines()
@@ -268,6 +341,9 @@ if doesMatch or dataSetType == "Clients":
         hiveCli.write("!exit \n")
     
         hiveCli.close()
+
+    theLog.write("Exited Beeline CLI\n")
+    theLog.flush()
         
     # Gracefully exit the beeline shell
     p.wait()
@@ -281,7 +357,10 @@ if doesMatch or dataSetType == "Clients":
 
     devNull.close()
 
-    #print "OUT:", "\n".join(stdout)
+    theLog.write("OUT:" + "\n".join(stdout))
+    theLog.flush()
+    theLog.write("ERR:" + "\n".join(stderr))
+    theLog.flush()
     #print "ERR:", "\n".join(stderr)
     #print "\n\n----\n"
 
@@ -324,6 +403,9 @@ record = "{0},{1},{2},{3},{4},{5}\n".format(nowTime, runTime, filename,
 theFile = open(metaDir + '/insert', 'a')
 theFile.write(record)
 theFile.close()
+
+theLog.write("\n\npush.py completed\n")
+theLog.close()
 
 # List all containers in this account
 """

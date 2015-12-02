@@ -116,9 +116,9 @@ endTime = int(time())
 runTime = (endTime - startTime)
 
 # Build up a CSV record for this files metadata
-record = "{0},{1},{2},{3},{4},{5},{6}\n".format(startTime, creationTime, filename, 
-                                                sizeInBytes, modificationTime, runTime
-                                                md5sum, result)
+record = "{0},{1},{2},{3},{4},{5},{6},{7}\n".format(startTime, creationTime, filename, 
+                                                    sizeInBytes, modificationTime, runTime,
+                                                    md5sum, result)
 
 # Push the record to a tempfile for now TODO: append to MD file
 theFile = open(metaDir + '/stage', 'a')

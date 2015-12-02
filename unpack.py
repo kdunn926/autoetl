@@ -70,6 +70,19 @@ def makeRecord(filename, path, code, startTime):
     return "{0},{1},{2},{3},{4},{5},{6}\n".format(now, create, filename, 
                                                   size, mod, runTime, code)
 
+# Moving this to the begining to avoid stalling loads
+# waiting for this file to compare row counts
+unzipCommand = "{prog} x {fname} {member} -o{dest} -p{passwd}".format(prog=unzipUtil,
+                                                                      fname=fullFilePath,
+                                                                      member='RowCounts.txt',
+                                                                      dest=loadingDir,
+                                                                      passwd=theDataPassword)
+
+# Used to supress output
+devNull = open(devnull, 'w')
+p = Popen(unzipCommand, shell=True, stdout=devNull, stderr=STDOUT)
+p.wait()
+
 
 statusDict = {}
 
@@ -90,6 +103,9 @@ with ZipFile(fullFilePath) as zf:
                 continue
             path = os.path.join(path, word)
 
+        if member.filename == 'RowCounts.txt':
+            continue
+
         # Wrap this up to log errors, if necessary
         try:
             # This doesn't work with AES-encrypted archives,
@@ -106,8 +122,6 @@ with ZipFile(fullFilePath) as zf:
                                                                                   passwd=theDataPassword)
             #print unzipCommand
 
-            # Used to supress output
-            devNull = open(devnull, 'w')
             p = Popen(unzipCommand, shell=True, stdout=devNull, stderr=STDOUT)
             p.wait()
 
