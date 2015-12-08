@@ -13,7 +13,7 @@
 #       the script, see a sample incrontab below:
 #
 #               $ incrontab -l
-#               /data/ingest IN_CREATE /usr/bin/python /data/scripts/push.py $@/$#
+#               /data/loading IN_CREATE /usr/bin/python /data/scripts/push.py $@/$#
 #
 #       Note, the $@/$# arguments pass the
 #       path and file name to this script
@@ -23,14 +23,13 @@
 from sys import argv, stdout
 from datetime import date
 from hashlib import md5
+from chardet.universaldetector import UniversalDetector
 from os.path import isfile
 from os import devnull
 from time import sleep, time
 from azure.storage.blob import BlobService
 from azure.common import AzureMissingResourceHttpError, AzureHttpError 
 from subprocess import Popen, STDOUT, PIPE
-from json import loads
-import re
 
 metaDir = "/data/meta"
 logRoot = "/data/logs/"
@@ -61,7 +60,7 @@ validDataSets = [
 'Appointments',
 'Clients',
 'Encounters',
-'FillRates',
+#'FillRates',
 'Medications',
 'Orders',
 'PatientDemographics',
@@ -72,8 +71,6 @@ validDataSets = [
 'Vitals'
 ]
 
-# Get the current time (GMT, epoch)
-startTime = int(time())
 
 
 # This is the full source DDL 
@@ -123,11 +120,15 @@ with open(ddlFile) as f:
         fieldString = ", ".join([v.split()[0] for v in validFields if v != ""])
         insertDdl[stringClean(table)] = fieldString
 
-#print "D-DDL", dataSetDdl
-#print "I-DDL", insertDdl
 
-def computeMd5AndLines(fname):
+# Make some additional entries since
+# this table differs from its .txt filename
+dataSetDdl["PatientDemographics"] = dataSetDdl["Patients"]
+insertDdl["PatientDemographics"] = insertDdl["Patients"]
+
+def computeMd5EncodingLines(fname):
     hash = md5()
+    encodingDetector = UniversalDetector()
     lines = 0
     with open(fname, "rb") as f:
         # Read 4096 bytes at a time to
@@ -135,9 +136,12 @@ def computeMd5AndLines(fname):
         for chunk in iter(lambda: f.read(4096), b""):
             # Tabulate the newlines in this chunk
             lines = lines + chunk.count('\x0a')
-
+            encodingDetector.feed(chunk)
             hash.update(chunk)
-    return hash.digest(), lines
+
+    encodingDetector.close()
+    encoding = "{0}-{1}".format(encodingDetector.result['encoding'], str(encodingDetector.result['confidence']))
+    return hash.digest(), encoding, lines
 
 fullFilePath = argv[1]
 filename = fullFilePath.split('/')[-1]
@@ -147,8 +151,35 @@ filename = fullFilePath.split('/')[-1]
 dataSetType = filename.split('.')[0]
 
 if dataSetType not in validDataSets:
+    todoFile = "/".join(fullFilePath.split('/')[:-1]) + "/" + dataSetType + ".todo"
+    t = Popen("rm -f {0}".format(todoFile).split())
+    t.wait()
+
     # Quietly ignore the erroneous files
     exit(0)
+elif filename.split('.')[1] == "todo":
+    exit(0)
+
+# Prevent load concurrency 
+# Hive doesn't seem to like getting slammed
+bigSets = ['Appointments', 'Encounters', 'Medications', 'Orders', 'PatientDemographics', 'Problems', 'Results', 'Vitals']
+#if dataSetType in bigSets:
+previousSet = ""
+if dataSetType in validDataSets[1:]:
+    previousSet = validDataSets[validDataSets.index(dataSetType) - 1]
+previousTodoFile = "/".join(fullFilePath.split('/')[:-1]) + "/" + previousSet + ".todo"
+
+# Relocating this to allow checkums
+# to be computed before sleeping 
+# between loads
+md5Checksum, encoding, countedRows = computeMd5EncodingLines(fullFilePath)
+
+# Wait until the previous big load completes
+while isfile(previousTodoFile):
+    sleep(10)
+
+# Get the current time (GMT, epoch)
+startTime = int(time())
 
 logFile = logRoot + "/push-{0}.log".format(dataSetType + "-" + str(startTime))
 
@@ -166,7 +197,6 @@ rowCountFullFilePath = "/".join(fullFilePath.split('/')[:-1]) + "/RowCounts.txt"
 # counts  the metadata in RowCounts.txt
 doesMatch = False
 
-md5Checksum, countedRows = computeMd5AndLines(fullFilePath)
 
 if dataSetType != "Clients":
     # Wait until row count file has also landed
@@ -185,6 +215,7 @@ if dataSetType != "Clients":
     for c in allCounts:
         # Split the lines on the delimiter
         dataSet, expectedRows = c.split("|")
+
         # Find the data set of interest
         if dataSet == dataSetType:
             # Compare the records (excluding header row)
@@ -217,7 +248,6 @@ if doesMatch or dataSetType == "Clients":
 
     # Create full paths for the location
     targetIngestFullPath = "{0}/{1}.txt".format(targetIngestPath, targetFile)
-    #targetArchiveFullPath = "{0}/{1}".format(dataSetType, targetFile)
 
     # Ensure a clean slate for pushing the new data set
     try:
@@ -275,26 +305,25 @@ if doesMatch or dataSetType == "Clients":
 
     hiveQueries.append(hiveCreateExtTable)
 
-    # These data sources are full-extracts, truncate before load
-    # As it turns out, Hive isn't smart enough to drop data
-    # from these external/"unmanaged" tables
-    #if dataSetType in ['Providers', 'Patients', 'Clients']:
-    #    hiveQueries.append("TRUNCATE TABLE pls.{0}_dev ;".format(dataSetType))
-
-    if dataSetType in ['Providers', 'Patients', 'Clients']:
-        try:
-            azureStorage.delete_blob(ingestContainer, dataSetType)
-            theLog.write("Truncated {0} via Blob deletion\n\n".format(dataSetType))
-            theLog.flush()
-        except AzureMissingResourceHttpError:
-            pass
+    insertMode = "INSERT INTO TABLE"
+    if dataSetType in ['Providers', 'PatientDemographics', 'Clients']:
+        # These data sources are full-extracts, truncate before load
+        insertMode = "INSERT OVERWRITE TABLE"
 
     loadStgQuery = "LOAD DATA INPATH '/{path}' INTO TABLE pls.kdunn_{t}_stg ;".format(path=targetIngestFullPath,
-                                                                                t=dataSetType)
+                                                                                      t=dataSetType)
     hiveQueries.append(loadStgQuery)
 
-    loadDevQuery = "INSERT INTO TABLE pls.kdunn_{0}_dev SELECT {1} FROM pls.kdunn_{0}_stg ;".format(dataSetType,
-                                                                                        insertDdl[dataSetType])
+    compositePatientField = " concat(cast(GenClientID as STRING), '-', cast(GenPatientID as STRING)) as PatientID"
+    insertColumns = insertDdl[dataSetType].replace(" PatientID", compositePatientField)
+
+    if dataSetType in ["PatientDemographics", "Providers"]:
+        compositeProviderField = " concat(cast(GenClientID as STRING), '-', cast(GenProviderID as STRING)) as ProviderID"
+        insertColumns = insertColumns.replace(" ProviderID", compositeProviderField)
+        
+    loadDevQuery = "{insertMode} pls.kdunn_{d}_dev SELECT {c} FROM pls.kdunn_{d}_stg ;".format(insertMode=insertMode,
+                                                                                               d=dataSetType,
+                                                                                               c=insertColumns)
     hiveQueries.append(loadDevQuery)
 
     hiveQueries.append("SELECT COUNT(*) FROM pls.kdunn_{0}_stg ;".format(dataSetType))
@@ -302,15 +331,17 @@ if doesMatch or dataSetType == "Clients":
     # Hide SSH output
     devNull = open(devnull)
 
+    theLog.write("Opening SSH tunnel to edge node {0}\n\n".format(hadoopEdgeNode))
+
     # Open a secure tunnel to channel the beeline
     # connection through
-    ssh = Popen(["ssh", hadoopEdgeNode, "-L10001:{hs2}:10001".format(hs2=hiveServer2)],
-                stdout=devNull, stderr=devNull)
+    ssh = Popen(["ssh", hadoopEdgeNode, "-L10001:{hs2}:10001".format(hs2=hiveServer2), "-N"],
+                stdout=devNull, stderr=theLog)
 
-    theLog.write("Opening SSH tunnel to edge node {0}\n\n".format(hadoopEdgeNode))
+    theLog.write("\n\n")
     theLog.flush()
 
-    # TODO - call out to Popen() and have a beeline Hive client execute
+    # Call out to Popen() and have a beeline Hive client execute
     # the CREATE EXTERNAL TABLE and do an INSERT INTO ... SELECT * FROM ...
     p = Popen(beeline, shell=True, stdin=PIPE, stdout=PIPE, stderr=PIPE)
 
@@ -320,54 +351,41 @@ if doesMatch or dataSetType == "Clients":
     hiveConnectString = "!connect jdbc:hive2://localhost:10001/pls;transportMode=http {u} {p}".format(u="etl",
                                                                                                       p="etl")
 
+    hiveCommands = "\n".join([hiveConnectString] + hiveQueries + ['!exit'])
+
     # Initiate the connection
-    with p.stdin as hiveCli:
-        hiveCli.write(hiveConnectString + "\n")
-        theLog.write("Connecting to Hiveserver2: " + hiveConnectString + "\n")
+    hiveCli = p.communicate # as hiveCli:
+    stdout, stderr = hiveCli(hiveCommands)
+    theLog.write("Connecting to Hiveserver2: " + hiveConnectString + "\n")
+    theLog.flush()
+
+    # Execute the loading process (finally)
+    for q in hiveQueries:
+        theLog.write("Executing Hive query: \n")
+        theLog.write(q + "\n")
         theLog.flush()
-
-        # Execute the loading process (finally)
-        for q in hiveQueries:
-            #print "hive < ", q
-            hiveCli.write(q + "\n")
-            theLog.write("Executing Hive query: \n")
-            theLog.write(q + "\n")
-            theLog.flush()
-
-        #print "OUT:", p.stdout.readlines()
-        #print "ERR:", p.stderr.readlines()
-        #stdout.flush()
-
-        hiveCli.write("!exit \n")
-    
-        hiveCli.close()
 
     theLog.write("Exited Beeline CLI\n")
     theLog.flush()
         
-    # Gracefully exit the beeline shell
+    # Wait for the beeline shell
+    # to gracefully exit
     p.wait()
 
     # Close the tunnel
     ssh.terminate()
     ssh.wait()
 
-    stdout = p.stdout.readlines()
-    stderr = p.stderr.readlines()
-
     devNull.close()
 
-    theLog.write("OUT:" + "\n".join(stdout))
+    theLog.write("OUT:" + stdout + "\n")
     theLog.flush()
-    theLog.write("ERR:" + "\n".join(stderr))
+    theLog.write("ERR:" + stderr + "\n")
     theLog.flush()
-    #print "ERR:", "\n".join(stderr)
-    #print "\n\n----\n"
 
-    result = stdout[-3].split()[1]
-    #print result,  "records"
+    result = stdout.split("\n")[-3].split()[1]
 
-    # Archive it as well -- this functionality has been relocated
+    # Archive it as well -- TODO relocate this functionality to
     # earlier in the ETL process, entire ZIP archives will be created
     # rather than per-set TXT archives
 
@@ -395,17 +413,23 @@ nowTime = int(time())
 runTime = (nowTime - startTime)
 
 # Build up a CSV record for this files metadata
-record = "{0},{1},{2},{3},{4},{5}\n".format(nowTime, runTime, filename, 
-                                            md5Checksum.encode('base64').strip(), 
-                                            countedRows - 1, result)
+record = "{0},{1},{2},{3},{4},{5},{6}\n".format(nowTime, runTime, filename, encoding,
+                                                md5Checksum.encode('base64').strip(), 
+                                                countedRows - 1, result)
 
 # Push the record to a tempfile for now TODO: append to MD file
 theFile = open(metaDir + '/insert', 'a')
 theFile.write(record)
 theFile.close()
 
-theLog.write("\n\npush.py completed\n")
+# Remove this data's todo file
+todoFile = "/".join(fullFilePath.split('/')[:-1]) + "/" + dataSetType + ".todo"
+t = Popen("rm -f {0}".format(todoFile).split())
+t.wait()
+
+theLog.write("\n\npush.py finished for {0}\n".format(dataSetType))
 theLog.close()
+
 
 # List all containers in this account
 """

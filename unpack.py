@@ -127,6 +127,10 @@ with ZipFile(fullFilePath) as zf:
 
             if p.returncode == 0:
                 statusDict[member] = makeRecord(member.filename, path, "OK", startTime)
+
+                todoFile = "touch {p}/{f}.todo".format(p=path, f=member.filename.split(".")[0])
+                t = Popen(todoFile.split())
+                t.wait()
             else:
                 statusDict[member] = makeRecord(member.filename, path, p.returncode, startTime)
             #print "Extracted", member.filename, "to", path
