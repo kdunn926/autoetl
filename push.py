@@ -175,7 +175,11 @@ previousTodoFile = "/".join(fullFilePath.split('/')[:-1]) + "/" + previousSet + 
 md5Checksum, encoding, countedRows = computeMd5EncodingLines(fullFilePath)
 
 # Wait until the previous big load completes
+startOfWaiting = int(time())
 while isfile(previousTodoFile):
+    # If the previous load hangs too long, stop waiting
+    if (int(time()) - startOfWaiting) >= 12000:
+        break
     sleep(10)
 
 # Get the current time (GMT, epoch)
