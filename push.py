@@ -169,6 +169,11 @@ if dataSetType in validDataSets[1:]:
     previousSet = validDataSets[validDataSets.index(dataSetType) - 1]
 previousTodoFile = "/".join(fullFilePath.split('/')[:-1]) + "/" + previousSet + ".todo"
 
+twoPreviousSet = ""
+if dataSetType in validDataSets[2:]:
+    twoPreviousSet = validDataSets[validDataSets.index(dataSetType) - 2]
+twoPreviousTodoFile = "/".join(fullFilePath.split('/')[:-1]) + "/" + twoPreviousSet + ".todo"
+
 # Relocating this to allow checkums
 # to be computed before sleeping 
 # between loads
@@ -177,6 +182,12 @@ md5Checksum, encoding, countedRows = computeMd5EncodingLines(fullFilePath)
 # Wait until the previous big load completes
 startOfWaiting = int(time())
 while isfile(previousTodoFile):
+    # The waiting clock starts over if
+    # we're behind a load in progress
+    # AND a queued load
+    if isfile(twoPreviousTodoFile):
+        startOfWaiting = int(time())
+
     # If the previous load hangs too long, stop waiting
     if (int(time()) - startOfWaiting) >= 12000:
         break
