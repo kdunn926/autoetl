@@ -54,6 +54,8 @@ def getFileStats(fullFilePath):
 def makeRecord(filename, path, code, startTime):
 
     fullFilePath = path + "/" + filename
+    if path == "":
+        fullFilePath = filename
 
     # Get the current time (GMT, epoch)
     now = int(time())
@@ -78,67 +80,102 @@ unzipCommand = "{prog} x {fname} {member} -o{dest} -p{passwd}".format(prog=unzip
                                                                       dest=loadingDir,
                                                                       passwd=theDataPassword)
 
-# Used to supress output
-devNull = open(devnull, 'w')
-p = Popen(unzipCommand, shell=True, stdout=devNull, stderr=STDOUT)
-p.wait()
-
-
 statusDict = {}
 
-with ZipFile(fullFilePath) as zf: 
-    # Extract one file at-a-time to gaurd
-    # against path traversal issues
-    # alternatively, use zf.extractall()
-    for member in zf.infolist():
-        # Path traversal defense copied from
-        # http://hg.python.org/cpython/file/tip/Lib/http/server.py#l789
-        words = member.filename.split('/')
+isClaims = False
+if "ADA" in filename.upper():
+    isClaims = True
 
-        path = loadingDir
-        for word in words[:-1]:
-            drive, word = os.path.splitdrive(word)
-            head, word = os.path.split(word)
-            if word in (os.curdir, os.pardir, ''): 
+if not isClaims:
+
+    # Used to supress output
+    devNull = open(devnull, 'w')
+    p = Popen(unzipCommand, shell=True, stdout=devNull, stderr=STDOUT)
+    p.wait()
+
+
+
+    with ZipFile(fullFilePath) as zf: 
+        # Extract one file at-a-time to gaurd
+        # against path traversal issues
+        # alternatively, use zf.extractall()
+        for member in zf.infolist():
+            # Path traversal defense copied from
+            # http://hg.python.org/cpython/file/tip/Lib/http/server.py#l789
+            words = member.filename.split('/')
+
+            path = loadingDir
+            for word in words[:-1]:
+                drive, word = os.path.splitdrive(word)
+                head, word = os.path.split(word)
+                if word in (os.curdir, os.pardir, ''): 
+                    continue
+                path = os.path.join(path, word)
+
+            if member.filename == 'RowCounts.txt':
                 continue
-            path = os.path.join(path, word)
 
-        if member.filename == 'RowCounts.txt':
-            continue
+            # Wrap this up to log errors, if necessary
+            try:
+                # This doesn't work with AES-encrypted archives,
+                # throws an RuntimeError -- "bad password"
+                #zf.extract(member, path, pwd=theDataPassword)
 
-        # Wrap this up to log errors, if necessary
-        try:
-            # This doesn't work with AES-encrypted archives,
-            # throws an RuntimeError -- "bad password"
-            #zf.extract(member, path, pwd=theDataPassword)
+                # Get the current time (GMT, epoch)
+                startTime = int(time())
 
-            # Get the current time (GMT, epoch)
-            startTime = int(time())
+                unzipCommand = "{prog} x {fname} {member} -o{dest} -p{passwd}".format(prog=unzipUtil,
+                                                                                      fname=fullFilePath,
+                                                                                      member=member.filename,
+                                                                                      dest=path,
+                                                                                      passwd=theDataPassword)
+                #print unzipCommand
 
-            unzipCommand = "{prog} x {fname} {member} -o{dest} -p{passwd}".format(prog=unzipUtil,
-                                                                                  fname=fullFilePath,
-                                                                                  member=member.filename,
-                                                                                  dest=path,
-                                                                                  passwd=theDataPassword)
-            #print unzipCommand
+                p = Popen(unzipCommand, shell=True, stdout=devNull, stderr=STDOUT)
+                p.wait()
 
-            p = Popen(unzipCommand, shell=True, stdout=devNull, stderr=STDOUT)
-            p.wait()
+                if p.returncode == 0:
+                    statusDict[member] = makeRecord(member.filename, path, "OK", startTime)
 
-            if p.returncode == 0:
-                statusDict[member] = makeRecord(member.filename, path, "OK", startTime)
+                    todoFile = "touch {p}/{f}.todo".format(p=path, f=member.filename.split(".")[0])
+                    t = Popen(todoFile.split())
+                    t.wait()
+                else:
+                    statusDict[member] = makeRecord(member.filename, path, p.returncode, startTime)
+                #print "Extracted", member.filename, "to", path
 
-                todoFile = "touch {p}/{f}.todo".format(p=path, f=member.filename.split(".")[0])
-                t = Popen(todoFile.split())
-                t.wait()
-            else:
-                statusDict[member] = makeRecord(member.filename, path, p.returncode, startTime)
-            #print "Extracted", member.filename, "to", path
+            except OSError as e:
+                #print "Caught exception for", member.filename, e[0]
+                statusDict[member] = makeRecord(member.filename, path, e[0])
+                pass
 
-        except OSError as e:
-            #print "Caught exception for", member.filename, e[0]
-            statusDict[member] = makeRecord(member.filename, path, e[0])
-            pass
+    devNull.close()
+
+else:
+    newFile = filename.split(".")[0]
+
+    sClaim = 'cat {fname} | bsdtar -xOf- | egrep "^S"'.format(fname=fullFilePath)
+    sClaimOut = open(loadingDir + "/" + newFile + "-s.csv", 'w')
+    startTime = int(time())
+    p = Popen(sClaim, shell=True, stdout=sClaimOut, stderr=STDOUT)
+    p.wait()
+    if p.returncode == 0:
+        statusDict["sClaim"] = makeRecord(newFile + "-s.csv", loadingDir, "OK", startTime)
+    else:
+        statusDict["sClaim"] = makeRecord(newFile + "-s.csv", loadingDir, p.returncode, startTime)
+    sClaimOut.close()
+
+    hClaim = 'cat {fname} | bsdtar -xOf- | egrep "^H"'.format(fname=fullFilePath)
+    hClaimOut = open(loadingDir + "/" + newFile + "-h.csv", 'w')
+    startTime = int(time())
+    p = Popen(hClaim, shell=True, stdout=hClaimOut, stderr=STDOUT)
+    p.wait()
+    if p.returncode == 0:
+        statusDict["hClaim"] = makeRecord(newFile + "-s.csv", loadingDir, "OK", startTime)
+    else:
+        statusDict["hClaim"] = makeRecord(newFile + "-s.csv", loadingDir, p.returncode, startTime)
+    hClaimOut.close()
+
 
 
 # Push the record to a tempfile for now TODO: append to MD file
@@ -148,4 +185,3 @@ for datafile in statusDict.keys():
     theFile.write(record)
 
 theFile.close()
-

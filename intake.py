@@ -91,8 +91,13 @@ logFile = logRoot + "/intake-{0}.log".format(str(startTime))
 
 theLog = open(logFile, 'w+')
 
+isClaims = False
+if "ADA" in filename.upper():
+    isClaims = True
+    ingestContainer = 'phaprodclaimarchivepls'
+
 # Wait until checksum file has also landed
-while True:
+while True and not isClaims:
     if isfile(md5FullFilePath + ".md5"):
         md5FullFilePath = md5FullFilePath + ".md5"
         break
@@ -108,7 +113,7 @@ while True:
 
     sleep(10)
 
-if validateChecksums(md5sum, md5FullFilePath):
+if isClaims or validateChecksums(md5sum, md5FullFilePath):
 
     try:
         move(fullFilePath, stagingDir)
@@ -130,9 +135,10 @@ if validateChecksums(md5sum, md5FullFilePath):
             theLog.write("Existing ingest data blob found, deleting it\n\n")
             theLog.flush()
 
-            azureStorage.delete_blob(ingestContainer, filename.split(".")[0] + ".md5")
-            theLog.write("Existing ingest checksum blob found, deleting it\n\n")
-            theLog.flush()
+            if not isClaims:
+                azureStorage.delete_blob(ingestContainer, filename.split(".")[0] + ".md5")
+                theLog.write("Existing ingest checksum blob found, deleting it\n\n")
+                theLog.flush()
         except AzureMissingResourceHttpError:
             pass
 
@@ -153,26 +159,31 @@ if validateChecksums(md5sum, md5FullFilePath):
             theLog.write("Wrote data to Blob\n")
             sleep(5)
 
-            theLog.write("Writing md5 to Blob {3} to {0}:{1}/{2}\n".format(azureAccount, ingestContainer, filename.split(".")[0] + ".md5", md5FullFilePath)) 
+            if not isClaims:
+                theLog.write("Writing md5 to Blob {3} to {0}:{1}/{2}\n".format(azureAccount, 
+                                                                               ingestContainer, 
+                                                                               filename.split(".")[0] + ".md5", 
+                                                                               md5FullFilePath)) 
 
-            azureStorage.put_block_blob_from_path(ingestContainer,
-                                                  filename.split(".")[0] + ".md5",
-                                                  md5FullFilePath,
-                                                  #content_md5=md5Checksum.encode('base64').strip(),
-                                                  max_connections=5)
+                azureStorage.put_block_blob_from_path(ingestContainer,
+                                                      filename.split(".")[0] + ".md5",
+                                                      md5FullFilePath,
+                                                      #content_md5=md5Checksum.encode('base64').strip(),
+                                                      max_connections=5)
 
-            theLog.write("Wrote md5 to Blob\n") 
+                theLog.write("Wrote md5 to Blob\n") 
 
-            theLog.write("Data blob and checksum both successfully archived to {0}:{1}.\n\n".format(azureAccount, ingestContainer))
-            theLog.flush()
+                theLog.write("Data blob and checksum both successfully archived to {0}:{1}.\n\n".format(azureAccount, ingestContainer))
+                theLog.flush()
 
             result = "OK"
         except OSError as e:
             theLog.write(e)
             result = e
 
-        except:
+        except AzureMissingResourceHttpError as e:
             theLog.write("Failed to archive one or both blobs.\n\n")
+            theLog.write(e)
             result = "ARCHIVE FAILED"
 
 

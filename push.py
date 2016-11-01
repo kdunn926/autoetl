@@ -34,9 +34,9 @@ from subprocess import Popen, STDOUT, PIPE
 metaDir = "/data/meta"
 logRoot = "/data/logs/"
 
-azureAccount = 'plsdatalake'
+azureAccount = 'plsinsightdata'
 ingestContainer = 'frisco'
-productionContainer = 'kdunn-test'
+productionContainer = 'plsdevelopment'
 
 # This functionality is being pushed
 # upstream in the ETL process
@@ -350,7 +350,7 @@ if doesMatch or dataSetType == "Clients":
 
     # Open a secure tunnel to channel the beeline
     # connection through
-    ssh = Popen(["ssh", hadoopEdgeNode, "-L10001:{hs2}:10001".format(hs2=hiveServer2), "-N"],
+    ssh = Popen(["ssh", "-4", hadoopEdgeNode, "-L10001:{hs2}:10001".format(hs2=hiveServer2), "-N"],
                 stdout=devNull, stderr=theLog)
 
     theLog.write("\n\n")
